@@ -1,0 +1,344 @@
+/* Gunmetal anodized ground, phosphor-green signal.
+   Dark is functional here, not decorative: the phone sits in peripheral vision
+   while you look at the monitor, and the tracking trace needs a dark ground. */
+
+:root {
+  --void: oklch(0.145 0.008 245);
+  --surface: oklch(0.193 0.009 245);
+  --surface-2: oklch(0.238 0.011 245);
+  --line: oklch(0.305 0.013 245);
+  --line-soft: oklch(0.245 0.011 245);
+
+  --ink: oklch(0.935 0.004 245);
+  --ink-dim: oklch(0.660 0.009 245);
+  --ink-faint: oklch(0.480 0.010 245);
+
+  --phosphor: oklch(0.865 0.205 148);
+  --phosphor-dim: oklch(0.620 0.145 148);
+  --amber: oklch(0.790 0.155 76);
+  --danger: oklch(0.660 0.190 26);
+
+  /* Machined geometry: filleted controls, hard-edged instrument rail. */
+  --r-control: 6px;
+  --r-surface: 3px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --t-micro: 110ms;
+  --t-std: 180ms;
+
+  --rail: 44px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--void);
+  color: var(--ink);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+/* ---------- instrument rail (the dense half of the layout) ---------- */
+
+.rail {
+  height: var(--rail);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.cell {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0 9px;
+  border-right: 1px solid var(--line-soft);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.cell:last-child {
+  border-right: 0;
+}
+.cell .k {
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+.cell .v {
+  color: var(--ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.v.good {
+  color: var(--phosphor);
+}
+.v.warn {
+  color: var(--amber);
+}
+.v.bad {
+  color: var(--danger);
+}
+
+/* ---------- pad (the void half) ---------- */
+
+.stage {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.pad {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background:
+    radial-gradient(120% 90% at 50% 0%, oklch(0.20 0.010 245) 0%, var(--void) 62%);
+  touch-action: none;
+  overscroll-behavior: none;
+  cursor: none;
+}
+
+.pad canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.padhint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  pointer-events: none;
+  transition: opacity var(--t-std) var(--ease-out);
+}
+
+/* ---------- controls ---------- */
+
+.bar {
+  display: grid;
+  grid-template-columns: 5fr 3fr 4fr;
+  gap: 1px;
+  background: var(--line-soft);
+  border-top: 1px solid var(--line);
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 0;
+  padding: 15px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  /* layered depth: inset top highlight plus one tight key shadow */
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.07),
+    0 1px 2px oklch(0 0 0 / 0.35);
+  transition:
+    background var(--t-micro) var(--ease-out),
+    transform var(--t-micro) var(--ease-out);
+}
+button:active {
+  background: var(--surface-2);
+  transform: scale(0.97);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.04);
+}
+button:focus-visible {
+  outline: 2px solid var(--phosphor);
+  outline-offset: -3px;
+}
+button.on {
+  color: var(--phosphor);
+}
+
+/* ---------- pairing / error screens ---------- */
+
+.screen {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 26px;
+  padding: 32px 24px calc(32px + env(safe-area-inset-bottom));
+  max-width: 34rem;
+  margin-inline: auto;
+}
+
+h1 {
+  font-size: clamp(2rem, 11vw, 3.1rem);
+  font-weight: 800;
+  line-height: 0.98;
+  letter-spacing: -0.03em;
+}
+
+.lede {
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 60ch;
+}
+
+.tag {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--phosphor-dim);
+  font-weight: 600;
+}
+
+.steps {
+  border: 1px solid var(--line);
+  border-radius: var(--r-surface);
+  background: var(--surface);
+}
+.step {
+  display: flex;
+  gap: 12px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12px;
+  color: var(--ink-dim);
+  line-height: 1.55;
+}
+.step:last-child {
+  border-bottom: 0;
+}
+.step .n {
+  color: var(--phosphor);
+  font-weight: 700;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+code {
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11px;
+  user-select: text;
+}
+
+.note {
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
+
+.err {
+  border: 1px solid color-mix(in oklch, var(--danger) 55%, var(--line));
+  border-radius: var(--r-surface);
+  background: color-mix(in oklch, var(--danger) 9%, var(--surface));
+  padding: 13px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: oklch(0.9 0.05 26);
+}
+
+.cta {
+  border-radius: var(--r-control);
+  border: 1px solid var(--line);
+  padding: 16px;
+  font-size: 12px;
+}
+
+/* live-region status text for screen readers and slow links */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  flex: 0 0 auto;
+}
+.pip.live {
+  background: var(--phosphor);
+}
+.pip.dead {
+  background: var(--danger);
+}
+
+.kbd {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+  left: -100px;
+}
+
+.sens {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px calc(9px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+input[type='range'] {
+  flex: 1;
+  accent-color: oklch(0.865 0.205 148);
+  height: 22px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
+  button:active {
+    transform: none;
+  }
+}

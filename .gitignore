@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# vercel
+.vercel/
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# compiled swift injector
+agent/injector
+agent/injector.dSYM/
+
+# macos
+.DS_Store

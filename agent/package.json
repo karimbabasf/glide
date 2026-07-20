@@ -1,0 +1,18 @@
+{
+  "name": "phone-mouse-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local agent: receives pointer input over WebRTC and injects it as macOS CGEvents.",
+  "scripts": {
+    "build": "swiftc -O -parse-as-library injector.swift -o injector",
+    "start": "npm run build && node index.js"
+  },
+  "dependencies": {
+    "node-datachannel": "^0.32.3",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
