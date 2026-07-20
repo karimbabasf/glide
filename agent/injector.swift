@@ -19,6 +19,11 @@ final class Injector {
     private var bounds: CGRect
     private var leftDown = false
     private var rightDown = false
+    private var clickStreak: Int64 = 0
+    private var lastClickTime: TimeInterval = 0
+    private var lastClickPos: CGPoint = .zero
+    private let doubleClickWindow: TimeInterval = 0.45
+    private let doubleClickDist: CGFloat = 6
     private let src = CGEventSource(stateID: .hidSystemState)
 
     private static let keys: [String: CGKeyCode] = [
@@ -95,18 +100,42 @@ final class Injector {
     func click(_ b: String, count: Int) {
         let isRight = (b == "r")
         let btn: CGMouseButton = isRight ? .right : .left
-        let dt: CGEventType = isRight ? .rightMouseDown : .leftMouseDown
-        let ut: CGEventType = isRight ? .rightMouseUp : .leftMouseUp
+        let downType: CGEventType = isRight ? .rightMouseDown : .leftMouseDown
+        let upType: CGEventType = isRight ? .rightMouseUp : .leftMouseUp
 
-        for i in 1...max(1, count) {
-            for t in [dt, ut] {
+        func post(_ state: Int64) {
+            for t in [downType, upType] {
                 guard let e = CGEvent(mouseEventSource: src, mouseType: t,
                                       mouseCursorPosition: pos, mouseButton: btn) else { continue }
-                // clickState is what makes the OS read two events as a double click.
-                e.setIntegerValueField(.mouseEventClickState, value: Int64(i))
+                // clickState is what makes the OS read a sequence as a double or
+                // triple click rather than N unrelated single clicks.
+                e.setIntegerValueField(.mouseEventClickState, value: state)
                 e.post(tap: .cghidEventTap)
             }
         }
+
+        // Explicit multi-click (n > 1) posts as one burst.
+        if count > 1 {
+            for i in 1...count { post(Int64(i)) }
+            clickStreak = 0
+            return
+        }
+
+        // Otherwise derive the click state from recency and proximity, so two
+        // quick taps become a native double click with no added latency on the
+        // first tap. This mirrors what a hardware mouse driver does. Right
+        // clicks never chain.
+        let now = Date().timeIntervalSince1970
+        if !isRight,
+           now - lastClickTime <= doubleClickWindow,
+           hypot(pos.x - lastClickPos.x, pos.y - lastClickPos.y) <= doubleClickDist {
+            clickStreak += 1
+        } else {
+            clickStreak = 1
+        }
+        lastClickTime = now
+        lastClickPos = pos
+        post(isRight ? 1 : clickStreak)
     }
 
     func scroll(dx: Double, dy: Double) {

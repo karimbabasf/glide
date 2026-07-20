@@ -22,22 +22,12 @@ const DOUBLE_MS = 260
 const LONG_PRESS_MS = 480
 const TRACE_MS = 620
 const SCROLL_GAIN = 1.15
+const CLASSIFY_SLOP = 14 // total two-finger travel before committing to scroll vs drag
+const STATIONARY_SLOP = 10 // a finger under this counts as anchored (held), not scrolling
+const SWIPE_THRESHOLD = 60 // centroid travel that fires a three-finger swipe
+const DRAG_ARM_DIST = 44 // a follow-up tap within this reach can arm drag lock
 
 const PHOSPHOR = '126, 249, 160'
-
-type Gesture = {
-  lastX: number
-  lastY: number
-  startT: number
-  lastT: number
-  moved: number
-  fingers: number
-  dragging: boolean
-  dragArmed: boolean
-  lastTapEnd: number
-  longTimer: number
-  rect: DOMRect | null
-}
 
 type TracePoint = { x: number; y: number; t: number; g: number }
 
@@ -75,15 +65,6 @@ function haptic(ms: number) {
   if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate(ms)
 }
 
-function centroid(touches: TouchList) {
-  let x = 0
-  let y = 0
-  for (let i = 0; i < touches.length; i++) {
-    x += touches[i].clientX
-    y += touches[i].clientY
-  }
-  return { x: x / touches.length, y: y / touches.length }
-}
 
 export default function Page() {
   const [phase, setPhase] = useState<Phase>('idle')
@@ -286,132 +267,255 @@ export default function Page() {
     const pad = padRef.current
     if (!pad) return
 
-    const g: Gesture = {
-      lastX: 0,
-      lastY: 0,
-      startT: 0,
-      lastT: 0,
-      moved: 0,
-      fingers: 0,
-      dragging: false,
-      dragArmed: false,
-      lastTapEnd: -1e9,
+    // Per-touch tracking by identifier. Reasoning about individual touches, not
+    // just a finger count and a centroid, is what lets us tell a two-finger
+    // scroll from a one-finger-held drag, and read a clean three-finger swipe.
+    type Rec = { lx: number; ly: number; st: number; moved: number; fdx: number; fdy: number }
+    const S = {
+      pts: new Map<number, Rec>(),
+      peak: 0,
+      mode: 'none' as 'none' | 'move' | 'scroll' | 'drag' | 'swipe' | 'pending2',
+      mouseDown: false,
+      armDrag: false,
+      tapOK: true,
+      swipeFired: false,
+      swipeSX: 0,
+      swipeSY: 0,
       longTimer: 0,
-      rect: null,
+      lastT: 0,
+      lastTapEnd: -1e9,
+      lastTapX: 0,
+      lastTapY: 0,
+      rect: null as DOMRect | null,
     }
 
-    const onStart = (e: TouchEvent) => {
-      e.preventDefault()
-      const now = performance.now()
-      g.rect = pad.getBoundingClientRect()
-      setTouched(true)
-
-      if (e.touches.length === 1) {
-        const t = e.touches[0]
-        g.lastX = t.clientX
-        g.lastY = t.clientY
-        g.startT = now
-        g.lastT = now
-        g.moved = 0
-        g.fingers = 1
-        trace.current.length = 0
-        // A second tap landing quickly arms drag-lock: move now and you drag.
-        g.dragArmed = now - g.lastTapEnd < DOUBLE_MS
-        g.longTimer = window.setTimeout(() => {
-          if (g.moved < TAP_SLOP && !g.dragging) {
-            send({ t: 'd', b: 'l' })
-            g.dragging = true
-            haptic(14)
-          }
-        }, LONG_PRESS_MS)
-      } else {
-        window.clearTimeout(g.longTimer)
-        g.fingers = Math.max(g.fingers, e.touches.length)
-        const c = centroid(e.touches)
-        g.lastX = c.x
-        g.lastY = c.y
-        g.lastT = now
+    const clearLong = () => {
+      if (S.longTimer) {
+        window.clearTimeout(S.longTimer)
+        S.longTimer = 0
       }
     }
-
-    const onMove = (e: TouchEvent) => {
-      e.preventDefault()
-      const now = performance.now()
-      const dt = Math.max(now - g.lastT, 1)
-
-      // Two or more fingers: scroll.
-      if (e.touches.length >= 2) {
-        const c = centroid(e.touches)
-        const dx = c.x - g.lastX
-        const dy = c.y - g.lastY
-        g.moved += Math.hypot(dx, dy)
-        g.lastX = c.x
-        g.lastY = c.y
-        g.lastT = now
-        const sign = naturalRef.current ? 1 : -1
-        pending.current.sdx += dx * SCROLL_GAIN * sign
-        pending.current.sdy += dy * SCROLL_GAIN * sign
-        return
+    const only = (): Rec | undefined => S.pts.values().next().value
+    const pair = (): Rec[] => Array.from(S.pts.values()).slice(0, 2)
+    const center = () => {
+      let x = 0
+      let y = 0
+      for (const r of S.pts.values()) {
+        x += r.lx
+        y += r.ly
       }
+      const n = S.pts.size || 1
+      return { x: x / n, y: y / n }
+    }
 
-      const t = e.touches[0]
-      const dx = t.clientX - g.lastX
-      const dy = t.clientY - g.lastY
-      g.moved += Math.hypot(dx, dy)
-      g.lastX = t.clientX
-      g.lastY = t.clientY
-      g.lastT = now
-
-      if (g.dragArmed && !g.dragging && g.moved > TAP_SLOP) {
-        send({ t: 'd', b: 'l' })
-        g.dragging = true
-        haptic(10)
-      }
-
+    // Shared cursor path: the acceleration curve plus the phosphor trace point.
+    const moveCursor = (dx: number, dy: number, dt: number, r: Rec) => {
       const speed = Math.hypot(dx, dy) / dt
       const gain = MIN_GAIN + (MAX_GAIN - MIN_GAIN) * (1 - Math.exp(-speed / KNEE))
       const applied = gain * sensRef.current
       gainRef.current = applied
       pending.current.dx += dx * applied
       pending.current.dy += dy * applied
-
-      if (g.rect) {
-        const p = { x: t.clientX - g.rect.left, y: t.clientY - g.rect.top }
+      if (S.rect) {
+        const p = { x: r.lx - S.rect.left, y: r.ly - S.rect.top }
         fingerRef.current = p
-        trace.current.push({ ...p, t: now, g: gain })
+        trace.current.push({ x: p.x, y: p.y, t: performance.now(), g: gain })
       }
+    }
+
+    const onStart = (e: TouchEvent) => {
+      e.preventDefault()
+      const now = performance.now()
+      S.rect = pad.getBoundingClientRect()
+      setTouched(true)
+
+      const fresh = S.pts.size === 0
+      for (const t of Array.from(e.changedTouches)) {
+        S.pts.set(t.identifier, { lx: t.clientX, ly: t.clientY, st: now, moved: 0, fdx: 0, fdy: 0 })
+      }
+      const n = S.pts.size
+      S.peak = Math.max(S.peak, n)
+      if (fresh) {
+        S.mode = 'none'
+        S.tapOK = true
+        S.swipeFired = false
+      }
+      clearLong()
+
+      if (n === 1) {
+        const t = e.changedTouches[0]
+        trace.current.length = 0
+        // A tap that just happened near here arms drag lock: press and move now
+        // and you are dragging (the trackpad tap, then tap-and-hold gesture).
+        S.armDrag =
+          now - S.lastTapEnd < DOUBLE_MS &&
+          Math.hypot(t.clientX - S.lastTapX, t.clientY - S.lastTapY) < DRAG_ARM_DIST
+        // Press and hold to pick up a drag with a single finger.
+        S.longTimer = window.setTimeout(() => {
+          const o = only()
+          if (o && o.moved < TAP_SLOP && !S.mouseDown && S.pts.size === 1) {
+            send({ t: 'd', b: 'l' })
+            S.mouseDown = true
+            S.mode = 'drag'
+            S.tapOK = false
+            haptic(14)
+          }
+        }, LONG_PRESS_MS)
+      } else if (n === 2) {
+        // Hold off: wait for movement to tell a scroll from a held drag.
+        if (S.mode !== 'drag') S.mode = 'pending2'
+      } else if (n >= 3) {
+        S.mode = 'swipe'
+        const c = center()
+        S.swipeSX = c.x
+        S.swipeSY = c.y
+        S.tapOK = false
+      }
+      S.lastT = now
+    }
+
+    const onMove = (e: TouchEvent) => {
+      e.preventDefault()
+      const now = performance.now()
+      const dt = Math.max(now - S.lastT, 1)
+
+      for (const t of Array.from(e.changedTouches)) {
+        const r = S.pts.get(t.identifier)
+        if (!r) continue
+        r.fdx = t.clientX - r.lx
+        r.fdy = t.clientY - r.ly
+        r.lx = t.clientX
+        r.ly = t.clientY
+        r.moved += Math.hypot(r.fdx, r.fdy)
+      }
+
+      const n = S.pts.size
+
+      if (n === 1) {
+        const r = only()
+        if (!r) return
+        if (r.moved > TAP_SLOP) S.tapOK = false
+        if (S.armDrag && !S.mouseDown && r.moved > TAP_SLOP) {
+          send({ t: 'd', b: 'l' })
+          S.mouseDown = true
+          S.mode = 'drag'
+          haptic(10)
+        }
+        if (S.mode === 'none') S.mode = 'move'
+        moveCursor(r.fdx, r.fdy, dt, r)
+      } else if (n === 2) {
+        const [a, b] = pair()
+        if (S.mode === 'pending2') {
+          const hi = Math.max(a.moved, b.moved)
+          const lo = Math.min(a.moved, b.moved)
+          if (hi > CLASSIFY_SLOP) {
+            if (lo < STATIONARY_SLOP) {
+              // One finger anchored, the other moving: a held drag, not a scroll.
+              S.mode = 'drag'
+              S.tapOK = false
+              if (!S.mouseDown) {
+                send({ t: 'd', b: 'l' })
+                S.mouseDown = true
+                haptic(10)
+              }
+            } else {
+              S.mode = 'scroll'
+              S.tapOK = false
+            }
+          }
+        }
+        if (S.mode === 'scroll') {
+          const sign = naturalRef.current ? 1 : -1
+          let dx = 0
+          let dy = 0
+          let k = 0
+          for (const t of Array.from(e.changedTouches)) {
+            const r = S.pts.get(t.identifier)
+            if (!r) continue
+            dx += r.fdx
+            dy += r.fdy
+            k++
+          }
+          if (k) {
+            pending.current.sdx += (dx / k) * SCROLL_GAIN * sign
+            pending.current.sdy += (dy / k) * SCROLL_GAIN * sign
+          }
+        } else if (S.mode === 'drag') {
+          const anchor = a.moved <= b.moved ? a : b
+          for (const t of Array.from(e.changedTouches)) {
+            const r = S.pts.get(t.identifier)
+            if (!r || r === anchor) continue
+            moveCursor(r.fdx, r.fdy, dt, r)
+          }
+        }
+      } else if (n >= 3 && S.mode === 'swipe' && !S.swipeFired) {
+        const c = center()
+        const dx = c.x - S.swipeSX
+        const dy = c.y - S.swipeSY
+        if (Math.max(Math.abs(dx), Math.abs(dy)) > SWIPE_THRESHOLD) {
+          S.swipeFired = true
+          // Three fingers reproduce the desktop trackpad swipes through their
+          // default macOS keyboard shortcuts.
+          if (Math.abs(dy) >= Math.abs(dx)) {
+            // up = Mission Control, down = App Expose
+            send({ t: 'key', k: dy < 0 ? 'up' : 'down', m: ['ctrl'] })
+          } else {
+            // left or right = move one space
+            send({ t: 'key', k: dx < 0 ? 'left' : 'right', m: ['ctrl'] })
+          }
+          haptic(22)
+        }
+      }
+      S.lastT = now
     }
 
     const onEnd = (e: TouchEvent) => {
       e.preventDefault()
       const now = performance.now()
-      window.clearTimeout(g.longTimer)
+      clearLong()
 
-      if (e.touches.length === 0) {
-        if (g.dragging) {
+      const ended = Array.from(e.changedTouches)
+        .map((t) => S.pts.get(t.identifier))
+        .filter((r): r is Rec => Boolean(r))
+      for (const t of Array.from(e.changedTouches)) S.pts.delete(t.identifier)
+      const remaining = S.pts.size
+
+      if (remaining === 0) {
+        if (S.mouseDown) {
           send({ t: 'u', b: 'l' })
-          g.dragging = false
+          S.mouseDown = false
           haptic(8)
-        } else if (g.moved < TAP_SLOP && now - g.startT < TAP_MS) {
-          if (g.fingers >= 2) {
-            send({ t: 'c', b: 'r' })
-            haptic(16)
-          } else {
-            send({ t: 'c', b: 'l' })
-            haptic(8)
-            g.lastTapEnd = now
+        } else if (S.tapOK && !S.swipeFired) {
+          const quick = ended.every((r) => now - r.st < TAP_MS && r.moved < TAP_SLOP)
+          if (quick) {
+            if (S.peak >= 2) {
+              send({ t: 'c', b: 'r' })
+              haptic(16)
+            } else {
+              // Sent at once. The injector turns two quick taps into a native
+              // double click via click state, so single clicks keep zero delay.
+              send({ t: 'c', b: 'l' })
+              haptic(8)
+              S.lastTapEnd = now
+              const o = ended[0]
+              if (o) {
+                S.lastTapX = o.lx
+                S.lastTapY = o.ly
+              }
+            }
           }
         }
-        g.fingers = 0
-        g.dragArmed = false
+        S.mode = 'none'
+        S.peak = 0
+        S.swipeFired = false
+        S.armDrag = false
         fingerRef.current = null
-      } else {
-        // A finger lifted mid-gesture: re-anchor on what is still down.
-        const c = centroid(e.touches)
-        g.lastX = c.x
-        g.lastY = c.y
-        g.lastT = now
+      } else if (remaining === 1 && (S.mode === 'pending2' || S.mode === 'scroll')) {
+        // Dropped to one finger before a two-finger intent resolved: let the
+        // survivor drive the cursor.
+        S.mode = 'move'
       }
+      S.lastT = now
     }
 
     pad.addEventListener('touchstart', onStart, { passive: false })
@@ -419,7 +523,7 @@ export default function Page() {
     pad.addEventListener('touchend', onEnd, { passive: false })
     pad.addEventListener('touchcancel', onEnd, { passive: false })
     return () => {
-      window.clearTimeout(g.longTimer)
+      clearLong()
       pad.removeEventListener('touchstart', onStart)
       pad.removeEventListener('touchmove', onMove)
       pad.removeEventListener('touchend', onEnd)
@@ -684,8 +788,10 @@ export default function Page() {
         <canvas ref={canvasRef} />
         <div className="padhint" style={{ opacity: touched ? 0 : 1 }}>
           <div>drag to move &middot; tap to click</div>
-          <div>two fingers to scroll or right click</div>
-          <div>hold to drag</div>
+          <div>double tap to double click</div>
+          <div>two fingers scroll &middot; two finger tap right click</div>
+          <div>three fingers up for mission control</div>
+          <div>hold, or tap then hold, to drag</div>
         </div>
       </div>
 
