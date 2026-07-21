@@ -23,7 +23,8 @@ const LONG_PRESS_MS = 480
 const TRACE_MS = 620
 const SCROLL_GAIN = 1.15
 const CLASSIFY_SLOP = 14 // total two-finger travel before committing to scroll vs drag
-const STATIONARY_SLOP = 10 // a finger under this counts as anchored (held), not scrolling
+const DRAG_ANCHOR_SLOP = 8 // a finger under this (while the other travels) is an anchored held drag
+const DRAG_MOVER_MIN = 30 // the moving finger must pass this before a two-finger drag engages
 const SWIPE_THRESHOLD = 60 // centroid travel that fires a three-finger swipe
 const DRAG_ARM_DIST = 44 // a follow-up tap within this reach can arm drag lock
 
@@ -43,6 +44,19 @@ async function post(body: unknown): Promise<Record<string, unknown>> {
     body: JSON.stringify(body),
   })
   return (await res.json()) as Record<string, unknown>
+}
+
+// Runtime ICE config (STUN, plus TURN when the server has it configured). Falls
+// back to the built-in STUN list if the endpoint is unreachable.
+async function fetchIce(): Promise<RTCIceServer[]> {
+  try {
+    const res = await fetch('/api/ice', { cache: 'no-store' })
+    const j = (await res.json()) as { iceServers?: RTCIceServer[] }
+    if (j.iceServers?.length) return j.iceServers
+  } catch {
+    /* fall back to the built-in STUN list */
+  }
+  return ICE
 }
 
 // Non-trickle ICE: gather everything, then exchange one complete SDP. Costs a
@@ -77,6 +91,8 @@ export default function Page() {
   const [natural, setNatural] = useState(true)
   const [kbOpen, setKbOpen] = useState(false)
   const [touched, setTouched] = useState(false)
+  const [link, setLink] = useState<'direct' | 'relay' | null>(null)
+  const [flash, setFlash] = useState<{ label: string; seq: number }>({ label: '', seq: 0 })
 
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const chRef = useRef<{ ctrl: RTCDataChannel | null; input: RTCDataChannel | null }>({
@@ -95,6 +111,18 @@ export default function Page() {
   const trace = useRef<TracePoint[]>([])
   const fingerRef = useRef<{ x: number; y: number } | null>(null)
   const pingRef = useRef<{ id: number; sent: number }>({ id: 0, sent: 0 })
+  const flashSeq = useRef(0)
+
+  // Transient label for a discrete gesture (right click, mission control, ...),
+  // so you get confirmation something registered. Not fired on plain moves.
+  const showFlash = useCallback((label: string) => {
+    flashSeq.current += 1
+    const seq = flashSeq.current
+    setFlash({ label, seq })
+    window.setTimeout(() => {
+      setFlash((f) => (f.seq === seq ? { label: '', seq } : f))
+    }, 750)
+  }, [])
 
   useEffect(() => {
     sensRef.current = sens
@@ -136,7 +164,7 @@ export default function Page() {
         }
 
         setPhase('negotiating')
-        const pc = new RTCPeerConnection({ iceServers: ICE })
+        const pc = new RTCPeerConnection({ iceServers: await fetchIce() })
         pcRef.current = pc
 
         // The agent opens two channels: "ctrl" reliable and ordered, "input"
@@ -254,9 +282,40 @@ export default function Page() {
       txRef.current = 0
       setGainOut(gainRef.current)
     }, 1000)
+    // Is the live path direct (host to host) or relayed through TURN? Read it
+    // off the selected ICE candidate pair.
+    const linkPoll = setInterval(async () => {
+      const pc = pcRef.current
+      if (!pc) return
+      try {
+        const stats = await pc.getStats()
+        let pair: RTCIceCandidatePairStats | undefined
+        let selectedId: string | undefined
+        stats.forEach((r: { type: string; selectedCandidatePairId?: string }) => {
+          if (r.type === 'transport' && r.selectedCandidatePairId) selectedId = r.selectedCandidatePairId
+        })
+        if (selectedId) pair = stats.get(selectedId) as RTCIceCandidatePairStats | undefined
+        if (!pair) {
+          stats.forEach((r: RTCIceCandidatePairStats) => {
+            if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated ?? true)) pair = r
+          })
+        }
+        if (pair?.localCandidateId) {
+          const local = stats.get(pair.localCandidateId) as { candidateType?: string } | undefined
+          const remote = pair.remoteCandidateId
+            ? (stats.get(pair.remoteCandidateId) as { candidateType?: string } | undefined)
+            : undefined
+          const relayed = local?.candidateType === 'relay' || remote?.candidateType === 'relay'
+          setLink(relayed ? 'relay' : 'direct')
+        }
+      } catch {
+        /* stats unavailable */
+      }
+    }, 2500)
     return () => {
       clearInterval(ping)
       clearInterval(meter)
+      clearInterval(linkPoll)
     }
   }, [phase, send])
 
@@ -274,13 +333,15 @@ export default function Page() {
     const S = {
       pts: new Map<number, Rec>(),
       peak: 0,
-      mode: 'none' as 'none' | 'move' | 'scroll' | 'drag' | 'swipe' | 'pending2',
+      mode: 'none' as 'none' | 'move' | 'scroll' | 'drag' | 'swipe' | 'pending2' | 'spent',
       mouseDown: false,
       armDrag: false,
       tapOK: true,
       swipeFired: false,
       swipeSX: 0,
       swipeSY: 0,
+      scx: 0,
+      scy: 0,
       longTimer: 0,
       lastT: 0,
       lastTapEnd: -1e9,
@@ -394,6 +455,7 @@ export default function Page() {
       if (n === 1) {
         const r = only()
         if (!r) return
+        if (S.mode === 'spent') return // a lifted-to-one-finger scroll stays inert
         if (r.moved > TAP_SLOP) S.tapOK = false
         if (S.armDrag && !S.mouseDown && r.moved > TAP_SLOP) {
           send({ t: 'd', b: 'l' })
@@ -405,12 +467,15 @@ export default function Page() {
         moveCursor(r.fdx, r.fdy, dt, r)
       } else if (n === 2) {
         const [a, b] = pair()
+        const cx = (a.lx + b.lx) / 2
+        const cy = (a.ly + b.ly) / 2
         if (S.mode === 'pending2') {
           const hi = Math.max(a.moved, b.moved)
           const lo = Math.min(a.moved, b.moved)
           if (hi > CLASSIFY_SLOP) {
-            if (lo < STATIONARY_SLOP) {
-              // One finger anchored, the other moving: a held drag, not a scroll.
+            // Bias hard to scroll. Only a held drag when one finger is clearly
+            // anchored while the other has traveled well past it.
+            if (lo < DRAG_ANCHOR_SLOP && hi > DRAG_MOVER_MIN) {
               S.mode = 'drag'
               S.tapOK = false
               if (!S.mouseDown) {
@@ -421,25 +486,20 @@ export default function Page() {
             } else {
               S.mode = 'scroll'
               S.tapOK = false
+              S.scx = cx // seed the centroid so scroll starts from rest, no jump
+              S.scy = cy
             }
           }
         }
         if (S.mode === 'scroll') {
+          // Scroll by the movement of the two-finger centroid. Smoother than
+          // per-touch deltas, which arrive unevenly between the two fingers and
+          // made scrolling stutter.
           const sign = naturalRef.current ? 1 : -1
-          let dx = 0
-          let dy = 0
-          let k = 0
-          for (const t of Array.from(e.changedTouches)) {
-            const r = S.pts.get(t.identifier)
-            if (!r) continue
-            dx += r.fdx
-            dy += r.fdy
-            k++
-          }
-          if (k) {
-            pending.current.sdx += (dx / k) * SCROLL_GAIN * sign
-            pending.current.sdy += (dy / k) * SCROLL_GAIN * sign
-          }
+          pending.current.sdx += (cx - S.scx) * SCROLL_GAIN * sign
+          pending.current.sdy += (cy - S.scy) * SCROLL_GAIN * sign
+          S.scx = cx
+          S.scy = cy
         } else if (S.mode === 'drag') {
           const anchor = a.moved <= b.moved ? a : b
           for (const t of Array.from(e.changedTouches)) {
@@ -457,11 +517,13 @@ export default function Page() {
           // Three fingers reproduce the desktop trackpad swipes through their
           // default macOS keyboard shortcuts.
           if (Math.abs(dy) >= Math.abs(dx)) {
-            // up = Mission Control, down = App Expose
-            send({ t: 'key', k: dy < 0 ? 'up' : 'down', m: ['ctrl'] })
+            const up = dy < 0
+            send({ t: 'key', k: up ? 'up' : 'down', m: ['ctrl'] })
+            showFlash(up ? 'Mission Control' : 'App Expose')
           } else {
-            // left or right = move one space
-            send({ t: 'key', k: dx < 0 ? 'left' : 'right', m: ['ctrl'] })
+            const leftward = dx < 0
+            send({ t: 'key', k: leftward ? 'left' : 'right', m: ['ctrl'] })
+            showFlash(leftward ? 'Space left' : 'Space right')
           }
           haptic(22)
         }
@@ -491,11 +553,14 @@ export default function Page() {
             if (S.peak >= 2) {
               send({ t: 'c', b: 'r' })
               haptic(16)
+              showFlash('Right click')
             } else {
               // Sent at once. The injector turns two quick taps into a native
               // double click via click state, so single clicks keep zero delay.
+              const isDouble = now - S.lastTapEnd < DOUBLE_MS
               send({ t: 'c', b: 'l' })
               haptic(8)
+              if (isDouble) showFlash('Double click')
               S.lastTapEnd = now
               const o = ended[0]
               if (o) {
@@ -510,10 +575,11 @@ export default function Page() {
         S.swipeFired = false
         S.armDrag = false
         fingerRef.current = null
-      } else if (remaining === 1 && (S.mode === 'pending2' || S.mode === 'scroll')) {
-        // Dropped to one finger before a two-finger intent resolved: let the
-        // survivor drive the cursor.
-        S.mode = 'move'
+      } else if (remaining === 1) {
+        // A finger lifted mid gesture.
+        if (S.mode === 'pending2') S.mode = 'move'
+        else if (S.mode === 'scroll') S.mode = 'spent' // do not let the survivor jerk the cursor
+        // a 'drag' keeps going: the remaining finger drags with the button held
       }
       S.lastT = now
     }
@@ -762,7 +828,9 @@ export default function Page() {
       <div className="rail">
         <div className="cell">
           <span className="k">Link</span>
-          <span className="v good">OK</span>
+          <span className={`v ${link === 'direct' ? 'good' : link === 'relay' ? 'warn' : ''}`}>
+            {link === 'direct' ? 'DIRECT' : link === 'relay' ? 'RELAY' : '--'}
+          </span>
         </div>
         <div className="cell">
           <span className="k">RTT</span>
@@ -786,6 +854,11 @@ export default function Page() {
 
       <div className="pad" ref={padRef}>
         <canvas ref={canvasRef} />
+        {flash.label ? (
+          <div className="flash" key={flash.seq}>
+            {flash.label}
+          </div>
+        ) : null}
         <div className="padhint" style={{ opacity: touched ? 0 : 1 }}>
           <div>drag to move &middot; tap to click</div>
           <div>double tap to double click</div>

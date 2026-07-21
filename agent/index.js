@@ -23,7 +23,25 @@ const INJECTOR = path.join(HERE, 'injector')
 const ICE = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ]
+
+// Fetch the runtime ICE config (STUN plus any configured TURN) from the
+// signaling server, so TURN is enabled by env vars there with no agent change.
+// Falls back to the built-in STUN list if the endpoint is unreachable.
+async function fetchIce() {
+  try {
+    const res = await fetch(`${SIGNAL}/api/ice`, { cache: 'no-store' })
+    const j = await res.json()
+    if (Array.isArray(j.iceServers) && j.iceServers.length) {
+      if (j.relay) log('TURN relay available (works on client-isolated networks)')
+      return j.iceServers
+    }
+  } catch {
+    /* fall back to the built-in STUN list */
+  }
+  return ICE
+}
 
 // Only these ever reach the injector, regardless of what arrives on the wire.
 const ALLOWED = new Set(['m', 'd', 'u', 'c', 's', 'txt', 'key', 'bounds'])
@@ -94,7 +112,7 @@ async function session() {
   const secret = randomBytes(16).toString('hex') // 128 bits
   const secretHash = createHash('sha256').update(secret).digest('hex')
 
-  const pc = new RTCPeerConnection({ iceServers: ICE })
+  const pc = new RTCPeerConnection({ iceServers: await fetchIce() })
 
   // Reliable and ordered: auth, clicks, keys, telemetry. Correctness matters,
   // volume is tiny.

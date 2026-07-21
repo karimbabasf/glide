@@ -79,7 +79,7 @@ npm start
 
 `npm start` compiles the Swift injector, starts the agent, and prints a QR code. Scan it with your phone. The pairing link carries a 128 bit secret and expires after three minutes; the agent issues a fresh one automatically.
 
-Phone and Mac must be on the same network without client isolation. Home Wi-Fi or a phone hotspot both work; many cafe and co-working networks block device to device traffic (see [Status](#status-and-limits)).
+Phone and Mac should be on the same network. Most home and office wifi connects directly with no setup; networks that block device to device traffic need a TURN relay (see [Networks](#networks)).
 
 ### One time: Accessibility permission
 
@@ -147,13 +147,40 @@ node scripts/test-injector.mjs
 cd agent && node test-e2e.mjs
 ```
 
-## Status and limits
+## Networks
 
-The transport, signaling, and input injection are each verified, including a loopback harness that completes the full pairing and pushes commands to the injector. On real devices the direct link needs an actual route between the phone and the Mac. On a home network or a phone hotspot that just works. Many cafe, co-working, and guest networks enable client isolation that blocks device to device traffic, and there is no TURN relay configured yet, so those networks are not supported. Put both devices on the same permissive network, or use the phone Personal Hotspot.
+Glide fetches its ICE config at runtime from `/api/ice`, so connectivity scales with how the network is set up:
+
+- **Any network that allows device to device traffic** (most home and office wifi): the phone and Mac connect directly over host candidates, 2 to 5 ms, no relay, nothing to configure.
+- **Client-isolated networks** (some cafe, co-working, and guest wifi block peer to peer): a direct link is impossible, so you need a TURN relay. Configure one (below) and it works there too, at a latency cost since the stream is relayed. The phone rail shows `DIRECT` or `RELAY` so you always know which path you are on.
+
+### Enabling TURN
+
+Set either of these on the Vercel project, then redeploy. No code change; the phone and agent both read it from `/api/ice`.
+
+Cloudflare (free, recommended). Create a TURN key in the Cloudflare dashboard, then set:
+
+```
+CF_TURN_TOKEN_ID=...
+CF_TURN_API_TOKEN=...
+```
+
+Or any static-credential TURN (self-hosted coturn, Twilio):
+
+```
+TURN_URLS=turn:your.host:3478,turns:your.host:5349
+TURN_USERNAME=...
+TURN_CREDENTIAL=...
+```
+
+There is no working free zero-config TURN anymore (the old public relays have shut down), which is why this is opt-in rather than baked in.
+
+## Status
+
+The transport, signaling, and input injection are each verified, including a loopback harness that completes the full pairing and pushes commands to the injector. Direct connections work on any network without client isolation; isolated networks need TURN, above. Bluetooth is not an option: iOS Safari has no Web Bluetooth API, and iOS blocks the HID peripheral role even for native apps, so a phone cannot present itself as a mouse over Bluetooth.
 
 ## Roadmap
 
-- TURN relay so it works on client isolated networks, with a latency tradeoff.
 - Optional Upstash Redis for the signaling store, so the handshake never depends on a warm serverless instance.
 - Native iOS client if the web input surface hits a feel ceiling.
 

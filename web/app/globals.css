@@ -341,4 +341,46 @@ input[type='range'] {
   button:active {
     transform: none;
   }
+  .flash {
+    animation: none;
+    opacity: 0.92;
+  }
+}
+
+/* transient gesture confirmation label on the pad */
+.flash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 9px 16px;
+  border: 1px solid color-mix(in oklch, var(--phosphor) 38%, var(--line));
+  border-radius: var(--r-control);
+  background: color-mix(in oklch, var(--phosphor) 10%, var(--surface));
+  color: var(--phosphor);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  pointer-events: none;
+  box-shadow: 0 0 26px oklch(0.865 0.205 148 / 0.22);
+  animation: flash-pulse 750ms var(--ease-out) forwards;
+}
+@keyframes flash-pulse {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -46%) scale(0.94);
+  }
+  16% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  70% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -53%) scale(1);
+  }
 }
