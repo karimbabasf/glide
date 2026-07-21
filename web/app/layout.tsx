@@ -9,12 +9,12 @@ const mono = Azeret_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'Phone Mouse',
-  description: 'Turns this phone into a wireless trackpad for your Mac.',
+  title: 'Glide',
+  description: 'Glide turns your phone into a trackpad and keyboard for your Mac.',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'Phone Mouse',
+    title: 'Glide',
   },
   other: { 'mobile-web-app-capable': 'yes' },
 }

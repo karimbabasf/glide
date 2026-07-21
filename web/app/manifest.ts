@@ -2,9 +2,9 @@ import type { MetadataRoute } from 'next'
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'Phone Mouse',
-    short_name: 'Mouse',
-    description: 'Turns this phone into a wireless trackpad for your Mac.',
+    name: 'Glide',
+    short_name: 'Glide',
+    description: 'Glide turns your phone into a trackpad and keyboard for your Mac.',
     start_url: '/',
     display: 'standalone',
     orientation: 'portrait',

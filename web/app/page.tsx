@@ -706,7 +706,7 @@ export default function Page() {
     return (
       <main className="screen">
         <div>
-          <div className="tag">Phone Mouse</div>
+          <div className="tag">Glide</div>
           <h1>
             Precision
             <br />
